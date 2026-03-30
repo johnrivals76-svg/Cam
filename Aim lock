@@ -1,0 +1,243 @@
+local Players = game:GetService("Players")
+local Workspace = game:GetService("Workspace")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local GuiService = game:GetService("GuiService")
+
+local LocalPlayer = Players.LocalPlayer
+local Camera = Workspace.CurrentCamera
+local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
+
+-- CONFIG
+local LOCK_ON_PART = "Head" -- ALWAYS Locks to Head
+local MENU_SIZE = UDim2.new(0, 200, 0, 150)
+local MENU_POSITION = UDim2.new(0.05, 0, 0.7, 0)
+local BUTTON_SIZE = UDim2.new(0.8, 0, 0, 40)
+local LERP_SPEED = 0.2 -- How smooth the aim follows
+-- FOV Settings
+local FOV_RADIUS = 100
+local FOV_COLOR = Color3.new(1, 0, 0)
+local FOV_THICKNESS = 2
+-- RAINBOW ESP Settings (FULLY ENABLED)
+local ESP_TRANSPARENCY = 0.3 -- 0 = Solid, 1 = Invisible
+local RAINBOW_SPEED = 2 -- Higher = Faster color change
+-- MENU TITLE
+local MENU_TITLE = "Aim Lock"
+
+local isLocked = false
+local targetPlayer = nil
+local menuOpen = false
+local currentHighlight = nil -- Stores the ESP object
+local hue = 0 -- Used for color calculation
+
+-- UI Elements
+local ScreenGui
+local MenuFrame
+local ToggleButton
+local FOVCircle
+
+local function createMenu()
+    ScreenGui = Instance.new("ScreenGui")
+    ScreenGui.Name = "AimMenuSystem"
+    ScreenGui.Parent = PlayerGui
+
+    -- === FOV CIRCLE ===
+    FOVCircle = Instance.new("Frame")
+    FOVCircle.Name = "FOVCircle"
+    FOVCircle.Size = UDim2.new(0, FOV_RADIUS * 2, 0, FOV_RADIUS * 2)
+    FOVCircle.AnchorPoint = Vector2.new(0.5, 0.5)
+    FOVCircle.Position = UDim2.new(0.5, 0, 0.5, 0)
+    FOVCircle.BackgroundTransparency = 1
+    FOVCircle.BorderSizePixel = 0
+    FOVCircle.Parent = ScreenGui
+
+    local Corner = Instance.new("UICorner")
+    Corner.CornerRadius = UDim.new(1, 0)
+    Corner.Parent = FOVCircle
+
+    local Stroke = Instance.new("UIStroke")
+    Stroke.Thickness = FOV_THICKNESS
+    Stroke.Color = FOV_COLOR
+    Stroke.Parent = FOVCircle
+    -- === END OF FOV CIRCLE ===
+
+    MenuFrame = Instance.new("Frame")
+    MenuFrame.Name = "MenuWindow"
+    MenuFrame.Size = MENU_SIZE
+    MenuFrame.Position = MENU_POSITION
+    MenuFrame.BackgroundColor3 = Color3.new(0.1, 0.1, 0.1)
+    MenuFrame.BorderColor3 = Color3.new(1, 0, 0)
+    MenuFrame.BorderSizePixel = 2
+    MenuFrame.Visible = false
+    MenuFrame.Parent = ScreenGui
+
+    local Title = Instance.new("TextLabel")
+    Title.Name = "Title"
+    Title.Size = UDim2.new(1, 0, 0, 30)
+    Title.BackgroundColor3 = Color3.new(0.2, 0.2, 0.2)
+    Title.Text = MENU_TITLE
+    Title.TextColor3 = Color3.new(1, 1, 1)
+    Title.Font = Enum.Font.GothamBold
+    Title.TextScaled = true
+    Title.Parent = MenuFrame
+
+    ToggleButton = Instance.new("TextButton")
+    ToggleButton.Name = "ToggleFeature"
+    ToggleButton.Size = BUTTON_SIZE
+    ToggleButton.Position = UDim2.new(0.1, 0, 0.3, 0)
+    ToggleButton.BackgroundColor3 = Color3.new(0.3, 0.3, 0.3)
+    ToggleButton.Text = "Aim Lock: OFF"
+    ToggleButton.TextColor3 = Color3.new(1, 1, 1)
+    ToggleButton.Font = Enum.Font.Gotham
+    ToggleButton.TextScaled = true
+    ToggleButton.Parent = MenuFrame
+
+    ToggleButton.MouseButton1Click:Connect(toggleLock)
+
+    local OpenMenuButton = Instance.new("TextButton")
+    OpenMenuButton.Name = "OpenMenuButton"
+    OpenMenuButton.Size = UDim2.new(0, 100, 0, 40)
+    OpenMenuButton.Position = UDim2.new(0.05, 0, 0.92, 0)
+    OpenMenuButton.BackgroundColor3 = Color3.new(1, 0, 0)
+    OpenMenuButton.Text = "Open Menu"
+    OpenMenuButton.TextColor3 = Color3.new(1, 1, 1)
+    OpenMenuButton.Font = Enum.Font.GothamBold
+    OpenMenuButton.TextScaled = true
+    OpenMenuButton.Parent = ScreenGui
+
+    OpenMenuButton.MouseButton1Click:Connect(toggleMenuVisibility)
+end
+
+function toggleMenuVisibility()
+    menuOpen = not menuOpen
+    MenuFrame.Visible = menuOpen
+end
+
+local function isWithinFOV(targetPart)
+    local screenPos, onScreen = Camera:WorldToViewportPoint(targetPart.Position)
+    if not onScreen then return false end
+
+    local pixelPos = Vector2.new(screenPos.X * Camera.ViewportSize.X, screenPos.Y * Camera.ViewportSize.Y)
+    local centerPos = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
+    local distance = (pixelPos - centerPos).Magnitude
+
+    return distance < FOV_RADIUS
+end
+
+-- === ESP FUNCTIONS (RAINBOW + WALL VISIBLE) ===
+local function removeCurrentESP()
+    if currentHighlight then
+        currentHighlight:Destroy()
+        currentHighlight = nil
+    end
+end
+
+local function applyESPToTarget(character)
+    removeCurrentESP() -- Remove old ESP first
+
+    local Highlight = Instance.new("Highlight")
+    Highlight.Name = "TargetESP"
+    Highlight.Adornee = character -- Apply to whole character
+    Highlight.FillTransparency = ESP_TRANSPARENCY
+    Highlight.OutlineTransparency = 0
+    -- This makes it visible even if they are behind walls/objects
+    Highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop 
+    Highlight.Parent = character
+
+    currentHighlight = Highlight -- Save it so we can update colors
+end
+
+-- This runs every frame to make the colors change (Rainbow Effect)
+local function updateRainbowEffect(deltaTime)
+    if currentHighlight then
+        hue = (hue + deltaTime * RAINBOW_SPEED) % 1
+        local rainbowColor = Color3.fromHSV(hue, 1, 1) -- Convert to RGB color
+        currentHighlight.FillColor = rainbowColor
+        currentHighlight.OutlineColor = rainbowColor
+    end
+end
+-- === END OF ESP FUNCTIONS ===
+
+function toggleLock()
+    isLocked = not isLocked
+    if not isLocked then
+        removeCurrentESP() -- Remove ESP when turning off
+        targetPlayer = nil
+        ToggleButton.Text = "Aim Lock: OFF"
+        ToggleButton.BackgroundColor3 = Color3.new(0.3, 0.3, 0.3)
+    else
+        local closestDist = math.huge
+        local myChar = LocalPlayer.Character
+        if not myChar then 
+            isLocked = false
+            return 
+        end
+
+        for _, player in pairs(Players:GetPlayers()) do
+            if player ~= LocalPlayer and player.Character then
+                local targetPart = player.Character:FindFirstChild(LOCK_ON_PART)
+                if targetPart and isWithinFOV(targetPart) then
+                    local dist = (myChar.HumanoidRootPart.Position - player.Character.HumanoidRootPart.Position).Magnitude
+                    if dist < closestDist then
+                        closestDist = dist
+                        targetPlayer = player
+                    end
+                end
+            end
+        end
+
+        -- Apply ESP immediately if we found a target
+        if targetPlayer and targetPlayer.Character then
+            applyESPToTarget(targetPlayer.Character)
+        end
+
+        ToggleButton.Text = "Aim Lock: ON"
+        ToggleButton.BackgroundColor3 = Color3.new(0, 0.8, 0)
+    end
+end
+
+local function onInputBegan(input, gameProcessed)
+    if gameProcessed then return end
+    
+    if input.KeyCode == Enum.KeyCode.M then
+        toggleMenuVisibility()
+    end
+
+    if input.KeyCode == Enum.KeyCode.F then
+        toggleLock()
+    end
+end
+
+UserInputService.InputBegan:Connect(onInputBegan)
+
+-- Connect the rainbow color updater to the game loop
+RunService.RenderStepped:Connect(updateRainbowEffect)
+
+-- MAIN AIM LOGIC
+RunService.RenderStepped:Connect(function()
+    if isLocked and targetPlayer and targetPlayer.Character then
+        -- Always tracks the Head, follows if they move
+        local targetPart = targetPlayer.Character:FindFirstChild(LOCK_ON_PART)
+        
+        if targetPart and isWithinFOV(targetPart) then
+            -- Make sure ESP is still there (fixes if character respawns)
+            if not currentHighlight or currentHighlight.Adornee ~= targetPlayer.Character then
+                applyESPToTarget(targetPlayer.Character)
+            end
+
+            -- Move aim smoothly
+            Camera.CFrame = Camera.CFrame:Lerp(
+                CFrame.new(Camera.CFrame.Position, targetPart.Position),
+                LERP_SPEED
+            )
+        else
+            removeCurrentESP() -- Remove if they go out of FOV
+        end
+    else
+        removeCurrentESP() -- Safety remove if nothing is locked
+    end
+end)
+
+-- NO AUTO FIRE: There is zero code here that presses buttons or fires weapons.
+
+createMenu()
